@@ -15,7 +15,7 @@ let isReady = false;
 let groupId = null;
 
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: '/data/.wwebjs_auth' }),
+  authStrategy: new LocalAuth({ dataPath: './data/.wwebjs_auth' }),
   puppeteer: {
     headless: true,
     args: [
@@ -25,8 +25,9 @@ const client = new Client({
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process',
       '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
     ],
   },
 });

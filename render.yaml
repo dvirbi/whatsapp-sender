@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: whatsapp-sender
+    runtime: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: API_SECRET
+        value: birgers-secret-2026
+    disk:
+      name: whatsapp-data
+      mountPath: /data
+      sizeGB: 1
