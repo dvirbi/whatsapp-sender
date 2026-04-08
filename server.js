@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
-const GROUP_NAME = 'תזכורות-טווח קצר';
+const GROUP_NAME = 'תזכורות - טווח קצר';
 const API_SECRET = process.env.API_SECRET || 'birgers-secret-2026';
 
 let qrDataUrl = null;
@@ -45,12 +45,18 @@ client.on('ready', async () => {
 
   // Find the group ID once
   const chats = await client.getChats();
+
+  // Debug: Print all group names
+  const groups = chats.filter(c => c.isGroup);
+  console.log(`Found ${groups.length} groups:`);
+  groups.forEach(g => console.log(`  - "${g.name}"`));
+
   const group = chats.find(c => c.isGroup && c.name === GROUP_NAME);
   if (group) {
     groupId = group.id._serialized;
-    console.log(`Found group: ${GROUP_NAME} → ${groupId}`);
+    console.log(`✅ Found target group: ${GROUP_NAME} → ${groupId}`);
   } else {
-    console.warn(`Group "${GROUP_NAME}" not found!`);
+    console.warn(`❌ Group "${GROUP_NAME}" not found!`);
   }
 });
 
