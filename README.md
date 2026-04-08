@@ -1,47 +1,94 @@
 # WhatsApp Sender - Automated Group Messaging
 
-Sends birthday cards automatically to WhatsApp group using whatsapp-web.js.
+Sends birthday cards automatically to WhatsApp group "תזכורות-טווח קצר" using whatsapp-web.js.
 
-## 🚀 Quick Deploy to Railway (1-Click)
+## 🚀 One-Command Setup
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/whatsapp-sender?referralCode=birgers)
+```bash
+./setup-complete.sh
+```
 
-**After deployment:**
+This script will:
+1. Login to Railway (opens browser once)
+2. Deploy the WhatsApp server
+3. Configure environment variables
+4. Update Vercel with Railway URL
+5. Redeploy production
 
-1. Go to your Railway project → **Add Volume** → Mount path: `/data`
-2. Add environment variable: `API_SECRET=birgers-secret-2026`
-3. Open your Railway URL at `/qr` path (e.g., `https://your-app.up.railway.app/qr`)
-4. Scan the QR code with WhatsApp → Settings → Linked Devices
-5. Copy your Railway URL and add to Vercel:
+After running the script:
+- Open the Railway URL at `/qr`
+- Scan QR code with WhatsApp
+- Done! Birthday cards now send automatically 🎉
+
+## 📦 Manual Setup (if needed)
+
+<details>
+<summary>Click to expand manual steps</summary>
+
+### 1. Deploy to Railway
+
+```bash
+railway login
+railway init --name whatsapp-sender
+railway up
+railway volume add --mount /data
+railway variables set API_SECRET=birgers-secret-2026
+```
+
+### 2. Get Railway URL
+
+```bash
+railway domain
+# Copy the URL (e.g., https://whatsapp-sender.up.railway.app)
+```
+
+### 3. Update Vercel
 
 ```bash
 cd ../BirgersEvents
 vercel env add RAILWAY_URL production
-# Paste: https://your-app.up.railway.app
+# Paste the Railway URL
 
 vercel env add WHATSAPP_API_SECRET production
 # Enter: birgers-secret-2026
+
+vercel --prod
 ```
 
-Done! Birthday cards now send automatically to the group.
+### 4. Authenticate WhatsApp
 
-## 🔧 Manual Setup (if button doesn't work)
+1. Open: `https://YOUR-RAILWAY-URL/qr`
+2. Scan QR with WhatsApp → Settings → Linked Devices
+3. Done!
 
-```bash
-railway login
-railway init
-railway up
-railway volume add --mount /data
-railway variables set API_SECRET=birgers-secret-2026
-railway open
-```
+</details>
 
-## API Endpoints
+## 🔧 How It Works
 
-- `GET /qr` - Display QR code for WhatsApp authentication
-- `POST /send` - Send image to group (requires `secret` in body)
+1. User clicks "שלח עכשיו" on birthday card
+2. Vercel forwards image to Railway server
+3. Railway server sends via WhatsApp Web to group
+4. Group receives birthday card automatically
 
-## Environment Variables
+## 📡 API Endpoints
+
+- `GET /` - Health check
+- `GET /qr` - Display QR code for WhatsApp authentication  
+- `POST /send` - Send image to group (requires API_SECRET)
+
+## 🔐 Environment Variables
 
 - `API_SECRET` - Authentication secret (default: birgers-secret-2026)
-- `GROUP_ID` - WhatsApp group chat ID (auto-detected from invite link)
+- Group ID is auto-detected from invite link in code
+
+## 📝 Architecture
+
+```
+[Vercel Frontend] 
+    ↓ POST /api/send-birthday-card
+[Vercel Serverless] 
+    ↓ POST /send + image + caption
+[Railway WhatsApp Server] 
+    ↓ whatsapp-web.js
+[WhatsApp Group: תזכורות-טווץ קצר]
+```
