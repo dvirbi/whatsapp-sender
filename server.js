@@ -84,9 +84,9 @@ app.get('/status', (req, res) => {
   res.json({ ready: isReady, groupFound: !!groupId });
 });
 
-// Send image to group
+// Send image to multiple targets (groups or contacts)
 app.post('/send', async (req, res) => {
-  const { imageBase64, caption, secret } = req.body;
+  const { imageBase64, caption, targets, secret } = req.body;
 
   if (secret !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -94,19 +94,66 @@ app.post('/send', async (req, res) => {
   if (!isReady) {
     return res.status(503).json({ error: 'WhatsApp not connected' });
   }
-  if (!groupId) {
-    return res.status(404).json({ error: `Group "${GROUP_NAME}" not found` });
-  }
   if (!imageBase64) {
     return res.status(400).json({ error: 'imageBase64 required' });
   }
+  if (!targets || !Array.isArray(targets) || targets.length === 0) {
+    return res.status(400).json({ error: 'targets array required' });
+  }
 
   try {
+    // Get all chats once
+    const chats = await client.getChats();
+
     // Strip data URL prefix if present
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
     const media = new MessageMedia('image/jpeg', base64Data, 'mazal-tov.jpg');
-    await client.sendMessage(groupId, media, { caption: caption || '' });
-    res.json({ success: true });
+
+    const results = [];
+    let totalSent = 0;
+    let totalFailed = 0;
+
+    // Send to each target
+    for (const targetName of targets) {
+      try {
+        // Find chat by name (group or contact)
+        const chat = chats.find(c => c.name === targetName);
+
+        if (!chat) {
+          results.push({
+            target: targetName,
+            success: false,
+            error: 'לא נמצא ברשימת אנשי הקשר/קבוצות',
+          });
+          totalFailed++;
+          continue;
+        }
+
+        // Send message
+        await client.sendMessage(chat.id._serialized, media, { caption: caption || '' });
+        results.push({
+          target: targetName,
+          success: true,
+        });
+        totalSent++;
+        console.log(`✅ Sent to: ${targetName}`);
+      } catch (err) {
+        console.error(`❌ Failed to send to ${targetName}:`, err.message);
+        results.push({
+          target: targetName,
+          success: false,
+          error: err.message,
+        });
+        totalFailed++;
+      }
+    }
+
+    res.json({
+      success: true,
+      totalSent,
+      totalFailed,
+      results,
+    });
   } catch (err) {
     console.error('Send error:', err);
     res.status(500).json({ error: err.message });
