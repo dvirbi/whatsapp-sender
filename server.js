@@ -86,7 +86,7 @@ app.get('/status', (req, res) => {
 
 // Send image to multiple targets (groups or contacts)
 app.post('/send', async (req, res) => {
-  const { imageBase64, caption, targets, secret } = req.body;
+  const { imageBase64, imageUrl, caption, targets, secret } = req.body;
 
   if (secret !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -94,8 +94,8 @@ app.post('/send', async (req, res) => {
   if (!isReady) {
     return res.status(503).json({ error: 'WhatsApp not connected' });
   }
-  if (!imageBase64) {
-    return res.status(400).json({ error: 'imageBase64 required' });
+  if (!imageBase64 && !imageUrl) {
+    return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
   }
   if (!targets || !Array.isArray(targets) || targets.length === 0) {
     return res.status(400).json({ error: 'targets array required' });
@@ -105,9 +105,37 @@ app.post('/send', async (req, res) => {
     // Get all chats once
     const chats = await client.getChats();
 
-    // Strip data URL prefix if present
-    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    const media = new MessageMedia('image/jpeg', base64Data, 'mazal-tov.jpg');
+    // Create media from base64 or URL
+    let media;
+    if (imageUrl) {
+      media = await MessageMedia.fromUrl(imageUrl);
+    } else {
+      // Upload to ImgBB first to avoid base64 corruption issues
+      const IMGBB_API_KEY = '07db50019cb2904b93e3d895e4a3256c';
+      const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+
+      console.log('📤 Uploading to ImgBB... (base64 length:', base64Data.length, ')');
+
+      const formData = new URLSearchParams();
+      formData.append('image', base64Data);
+
+      const uploadRes = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const uploadData = await uploadRes.json();
+      if (!uploadRes.ok || !uploadData.success) {
+        const errorMsg = uploadData.error?.message || uploadData.error || 'Upload failed';
+        throw new Error(`ImgBB upload failed: ${errorMsg}`);
+      }
+
+      const uploadedUrl = uploadData.data.url;
+      console.log('✅ Uploaded to ImgBB:', uploadedUrl);
+
+      // Use the uploaded URL instead of base64
+      media = await MessageMedia.fromUrl(uploadedUrl);
+    }
 
     const results = [];
     let totalSent = 0;
