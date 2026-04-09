@@ -108,33 +108,17 @@ app.post('/send', async (req, res) => {
     // Create media from base64 or URL
     let media;
     if (imageUrl) {
+      console.log('Using image URL:', imageUrl);
       media = await MessageMedia.fromUrl(imageUrl);
-    } else {
-      // Upload to ImgBB first to avoid base64 corruption issues
-      const IMGBB_API_KEY = '07db50019cb2904b93e3d895e4a3256c';
+    } else if (imageBase64) {
+      // Use base64 DIRECTLY - no ImgBB!
       const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+      console.log('Using base64 directly, length:', base64Data.length);
 
-      console.log('📤 Uploading to ImgBB... (base64 length:', base64Data.length, ')');
-
-      const formData = new URLSearchParams();
-      formData.append('image', base64Data);
-
-      const uploadRes = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      const uploadData = await uploadRes.json();
-      if (!uploadRes.ok || !uploadData.success) {
-        const errorMsg = uploadData.error?.message || uploadData.error || 'Upload failed';
-        throw new Error(`ImgBB upload failed: ${errorMsg}`);
-      }
-
-      const uploadedUrl = uploadData.data.url;
-      console.log('✅ Uploaded to ImgBB:', uploadedUrl);
-
-      // Use the uploaded URL instead of base64
-      media = await MessageMedia.fromUrl(uploadedUrl);
+      // Create MessageMedia directly from base64
+      media = new MessageMedia('image/jpeg', base64Data, 'greeting.jpg');
+    } else {
+      throw new Error('No image provided');
     }
 
     const results = [];
