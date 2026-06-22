@@ -1,71 +1,64 @@
 const express = require('express');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const cors = require('cors');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
-const GROUP_NAME = 'תזכורות - טווח קצר';
 const API_SECRET = process.env.API_SECRET || 'birgers-secret-2026';
+const AUTH_DIR = './data/auth';
 
 let qrDataUrl = null;
 let isReady = false;
-let groupId = null;
+let sock = null;
 
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: './data/.wwebjs_auth' }),
-  puppeteer: {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--disable-extensions',
-    ],
-  },
-});
+async function startSocket() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
 
-client.on('qr', async (qr) => {
-  console.log('QR received — scan it at /qr');
-  qrDataUrl = await qrcode.toDataURL(qr);
-  isReady = false;
-});
+  sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: true,
+    logger: pino({ level: 'silent' }),
+    browser: ['BirgersEvents', 'Chrome', '120.0.0'],
+  });
 
-client.on('ready', async () => {
-  console.log('WhatsApp client ready!');
-  isReady = true;
-  qrDataUrl = null;
+  sock.ev.on('creds.update', saveCreds);
 
-  // Find the group ID once
-  const chats = await client.getChats();
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-  // Debug: Print all group names
-  const groups = chats.filter(c => c.isGroup);
-  console.log(`Found ${groups.length} groups:`);
-  groups.forEach(g => console.log(`  - "${g.name}"`));
+    if (qr) {
+      console.log('QR received — scan at /qr');
+      qrDataUrl = await qrcode.toDataURL(qr);
+      isReady = false;
+    }
 
-  const group = chats.find(c => c.isGroup && c.name === GROUP_NAME);
-  if (group) {
-    groupId = group.id._serialized;
-    console.log(`✅ Found target group: ${GROUP_NAME} → ${groupId}`);
-  } else {
-    console.warn(`❌ Group "${GROUP_NAME}" not found!`);
-  }
-});
+    if (connection === 'open') {
+      console.log('✅ WhatsApp connected!');
+      isReady = true;
+      qrDataUrl = null;
+    }
 
-client.on('disconnected', () => {
-  console.log('WhatsApp disconnected');
-  isReady = false;
-});
+    if (connection === 'close') {
+      isReady = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      console.log('Connection closed, code:', code);
+      if (code !== DisconnectReason.loggedOut) {
+        console.log('Reconnecting...');
+        setTimeout(startSocket, 3000);
+      } else {
+        console.log('Logged out — delete auth and restart to re-scan QR');
+      }
+    }
+  });
+}
 
-// QR code page — scan this once to connect
+// QR code page
 app.get('/qr', (req, res) => {
   if (isReady) return res.send('<h2>✅ WhatsApp מחובר!</h2>');
   if (!qrDataUrl) return res.send('<h2>⏳ ממתין לקוד QR...</h2><meta http-equiv="refresh" content="3">');
@@ -81,100 +74,104 @@ app.get('/qr', (req, res) => {
 
 // Status endpoint
 app.get('/status', (req, res) => {
-  res.json({ ready: isReady, groupFound: !!groupId });
+  res.json({ ready: isReady });
 });
 
-// Send image to multiple targets (groups or contacts)
+// Health check for Railway
+app.get('/health', (req, res) => {
+  res.status(200).send('ok');
+});
+
+// Send message to targets
 app.post('/send', async (req, res) => {
-  const { imageBase64, imageUrl, caption, targets, secret } = req.body;
+  const { imageBase64, imageUrl, caption, targets, secret, textOnly } = req.body;
 
   if (secret !== API_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (!isReady) {
+  if (!isReady || !sock) {
     return res.status(503).json({ error: 'WhatsApp not connected' });
   }
-  if (!imageBase64 && !imageUrl) {
-    return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
+  if (!textOnly && !imageBase64 && !imageUrl) {
+    return res.status(400).json({ error: 'imageBase64, imageUrl, or textOnly required' });
   }
   if (!targets || !Array.isArray(targets) || targets.length === 0) {
     return res.status(400).json({ error: 'targets array required' });
   }
 
-  try {
-    // Get all chats once
-    const chats = await client.getChats();
+  const results = [];
+  let totalSent = 0;
+  let totalFailed = 0;
 
-    // Create media from base64 or URL
-    let media;
-    if (imageUrl) {
-      console.log('Using image URL:', imageUrl);
-      media = await MessageMedia.fromUrl(imageUrl);
-    } else if (imageBase64) {
-      // Use base64 DIRECTLY - no ImgBB!
-      const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-      console.log('Using base64 directly, length:', base64Data.length);
-
-      // Create MessageMedia directly from base64
-      media = new MessageMedia('image/jpeg', base64Data, 'greeting.jpg');
-    } else {
-      throw new Error('No image provided');
-    }
-
-    const results = [];
-    let totalSent = 0;
-    let totalFailed = 0;
-
-    // Send to each target
-    for (const targetName of targets) {
-      try {
-        // Find chat by name (group or contact)
-        const chat = chats.find(c => c.name === targetName);
-
-        if (!chat) {
-          results.push({
-            target: targetName,
-            success: false,
-            error: 'לא נמצא ברשימת אנשי הקשר/קבוצות',
-          });
+  for (const target of targets) {
+    try {
+      // Convert target to WhatsApp JID
+      let jid;
+      if (target.includes('@')) {
+        // Already a JID (e.g. group ID like 120363...@g.us)
+        jid = target;
+      } else {
+        const cleaned = target.replace(/[\s\-\+\(\)]/g, '');
+        if (/^\d{9,15}$/.test(cleaned)) {
+          const normalized = cleaned.startsWith('0') ? '972' + cleaned.slice(1) : cleaned;
+          jid = normalized + '@s.whatsapp.net';
+        } else {
+          results.push({ target, success: false, error: 'Invalid target format' });
           totalFailed++;
           continue;
         }
-
-        // Send message
-        await client.sendMessage(chat.id._serialized, media, { caption: caption || '' });
-        results.push({
-          target: targetName,
-          success: true,
-        });
-        totalSent++;
-        console.log(`✅ Sent to: ${targetName}`);
-      } catch (err) {
-        console.error(`❌ Failed to send to ${targetName}:`, err.message);
-        results.push({
-          target: targetName,
-          success: false,
-          error: err.message,
-        });
-        totalFailed++;
       }
-    }
 
-    res.json({
-      success: true,
-      totalSent,
-      totalFailed,
-      results,
-    });
+      if (textOnly || (!imageBase64 && !imageUrl)) {
+        await sock.sendMessage(jid, { text: caption || '' });
+      } else if (imageBase64) {
+        const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        await sock.sendMessage(jid, { image: buffer, caption: caption || '' });
+      } else if (imageUrl) {
+        await sock.sendMessage(jid, { image: { url: imageUrl }, caption: caption || '' });
+      }
+
+      results.push({ target, success: true });
+      totalSent++;
+      console.log(`✅ Sent to: ${target}`);
+    } catch (err) {
+      console.error(`❌ Failed to send to ${target}:`, err.message);
+      results.push({ target, success: false, error: err.message });
+      totalFailed++;
+    }
+  }
+
+  res.json({ success: true, totalSent, totalFailed, results });
+});
+
+// List groups
+app.get('/groups', async (req, res) => {
+  if (!isReady || !sock) {
+    return res.status(503).json({ error: 'WhatsApp not connected' });
+  }
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    const list = Object.values(groups)
+      .filter(g => g.id && g.subject)
+      .map(g => ({ id: g.id, name: g.subject }));
+    list.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+    res.json({ groups: list });
   } catch (err) {
-    console.error('Send error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/', (req, res) => res.send('WhatsApp Sender running'));
+app.get('/', (req, res) => res.send('WhatsApp Sender running (Baileys)'));
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught exception:', err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('⚠️ Unhandled rejection:', err.message || err);
+});
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on port ${PORT}`));
-
-client.initialize();
+app.listen(PORT, () => {
+  console.log(`Server on port ${PORT}`);
+  startSocket();
+});
