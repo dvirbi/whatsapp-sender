@@ -1,7 +1,7 @@
 const express = require('express');
 const qrcode = require('qrcode');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -172,7 +172,6 @@ app.post('/render-and-send', async (req, res) => {
     // Render with Puppeteer → JPEG
     const browser = await puppeteer.launch({
       headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage();
