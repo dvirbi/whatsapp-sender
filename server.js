@@ -126,9 +126,9 @@ app.post('/send', async (req, res) => {
         await sock.sendMessage(jid, { text: caption || '' });
       } else if (imageBase64) {
         const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-        await sock.sendMessage(jid, { image: buffer, caption: caption || '' });
+        await sock.sendMessage(jid, { image: buffer, caption: caption || '', mimetype: 'image/png' });
       } else if (imageUrl) {
-        await sock.sendMessage(jid, { image: { url: imageUrl }, caption: caption || '' });
+        await sock.sendMessage(jid, { image: { url: imageUrl }, caption: caption || '', mimetype: 'image/png' });
       }
 
       results.push({ target, success: true });
