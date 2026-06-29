@@ -1,6 +1,7 @@
 const express = require('express');
 const qrcode = require('qrcode');
 const cors = require('cors');
+const sharp = require('sharp');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -125,10 +126,14 @@ app.post('/send', async (req, res) => {
       if (textOnly || (!imageBase64 && !imageUrl)) {
         await sock.sendMessage(jid, { text: caption || '' });
       } else if (imageBase64) {
-        const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-        await sock.sendMessage(jid, { image: buffer, caption: caption || '', mimetype: 'image/png' });
+        const rawBuffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        const jpegBuffer = await sharp(rawBuffer).jpeg({ quality: 90 }).toBuffer();
+        await sock.sendMessage(jid, { image: jpegBuffer, caption: caption || '', mimetype: 'image/jpeg' });
       } else if (imageUrl) {
-        await sock.sendMessage(jid, { image: { url: imageUrl }, caption: caption || '', mimetype: 'image/png' });
+        const response = await fetch(imageUrl);
+        const rawBuffer = Buffer.from(await response.arrayBuffer());
+        const jpegBuffer = await sharp(rawBuffer).jpeg({ quality: 90 }).toBuffer();
+        await sock.sendMessage(jid, { image: jpegBuffer, caption: caption || '', mimetype: 'image/jpeg' });
       }
 
       results.push({ target, success: true });
