@@ -83,6 +83,11 @@ app.get('/health', (req, res) => {
   res.status(200).send('ok');
 });
 
+// Version check (to verify deployments)
+app.get('/version', (req, res) => {
+  res.json({ version: '2.1.0', features: ['sharp-jpeg-convert'] });
+});
+
 // Send message to targets
 app.post('/send', async (req, res) => {
   const { imageBase64, imageUrl, caption, targets, secret, textOnly } = req.body;
