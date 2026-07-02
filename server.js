@@ -169,37 +169,22 @@ app.post('/render-and-send', async (req, res) => {
     // Build card HTML — identical to BirthdayCard.jsx with same CSS
     const cardHtml = buildCardHtml({ name, title, message, fromName, hebStr, bg, layout });
 
-    // Render with Puppeteer → JPEG
+    // Render with Puppeteer → JPEG (high-res so WhatsApp displays inline)
     const browser = await puppeteer.launch({
       headless: 'new',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage();
-    await page.setViewport({ width: 600, height: 500 });
+    await page.setViewport({ width: 600, height: 500, deviceScaleFactor: 2 });
     await page.setContent(cardHtml, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.birthday-card-preview');
     const cardEl = await page.$('.birthday-card-preview');
-    const jpegBuffer = await cardEl.screenshot({ type: 'jpeg', quality: 90 });
+    const jpegBuffer = await cardEl.screenshot({ type: 'jpeg', quality: 95 });
     await browser.close();
 
     console.log(`✅ Card rendered: ${(jpegBuffer.length / 1024).toFixed(1)} KB`);
 
-    // Upload to ImgBB
-    const formBody = new URLSearchParams();
-    formBody.append('key', IMGBB_API_KEY);
-    formBody.append('image', jpegBuffer.toString('base64'));
-
-    const imgbbRes = await fetch('https://api.imgbb.com/1/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formBody.toString(),
-    });
-    const imgbbData = await imgbbRes.json();
-    if (!imgbbData.success) throw new Error('ImgBB upload failed');
-    const imageUrl = imgbbData.data.url;
-    console.log(`✅ Uploaded: ${imageUrl}`);
-
-    // Send to WhatsApp targets (same as /send with imageUrl)
+    // Send JPEG buffer directly to WhatsApp targets (displays inline without download)
     const results = [];
     let totalSent = 0;
     let totalFailed = 0;
@@ -222,7 +207,7 @@ app.post('/render-and-send', async (req, res) => {
         }
 
         const caption = `🎉 מזל טוב ${name}!\n${hebStr || ''}`;
-        await sock.sendMessage(jid, { image: { url: imageUrl }, caption });
+        await sock.sendMessage(jid, { image: jpegBuffer, caption });
         results.push({ target, success: true });
         totalSent++;
         console.log(`✅ Sent to: ${target}`);
@@ -233,7 +218,7 @@ app.post('/render-and-send', async (req, res) => {
       }
     }
 
-    res.json({ success: true, totalSent, totalFailed, results, imageUrl });
+    res.json({ success: true, totalSent, totalFailed, results });
   } catch (err) {
     console.error('Render-and-send error:', err.message);
     res.status(500).json({ error: err.message });
