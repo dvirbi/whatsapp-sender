@@ -11,7 +11,9 @@ app.use(express.json({ limit: '20mb' }));
 
 const API_SECRET = process.env.API_SECRET || 'birgers-secret-2026';
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '07db50019cb2904b93e3d895e4a3256c';
+const HEBEVENTS_URL = process.env.HEBEVENTS_URL || 'https://hebevents.vercel.app';
 const AUTH_DIR = './data/auth';
+const LINK_CODE_RE = /HE-[A-Z0-9]{4}/;
 
 let qrDataUrl = null;
 let isReady = false;
@@ -30,6 +32,25 @@ async function startSocket() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Fires when the bot learns about a new group (including when it's just been added to one).
+  // If the group name contains a link code (HE-XXXX), tell HebEvents to associate it with that tenant.
+  sock.ev.on('groups.upsert', async (groups) => {
+    for (const g of groups) {
+      const match = (g.subject || '').match(LINK_CODE_RE);
+      if (!match) continue;
+      try {
+        await fetch(`${HEBEVENTS_URL}/api/link-whatsapp-group`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secret: API_SECRET, code: match[0], groupId: g.id }),
+        });
+        console.log(`🔗 Linked group "${g.subject}" (${g.id}) via code ${match[0]}`);
+      } catch (err) {
+        console.error('Failed to notify HebEvents of group link:', err.message);
+      }
+    }
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
