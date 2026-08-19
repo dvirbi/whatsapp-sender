@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY package*.json ./
+COPY patches ./patches
 RUN npm ci --omit=dev
 COPY server.js ./
 
