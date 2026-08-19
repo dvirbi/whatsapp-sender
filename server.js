@@ -166,7 +166,18 @@ app.get('/qr', (req, res) => {
 app.get('/qr/:sessionKey', (req, res) => {
   if (!requireSecret(req, res)) return;
   const { sessionKey } = req.params;
-  if (!sessions.has(sessionKey)) startSocket(sessionKey).catch(err => console.error(`Failed to start session ${sessionKey}:`, err.message));
+  const existing = sessions.get(sessionKey);
+  if (!existing) {
+    startSocket(sessionKey).catch(err => console.error(`Failed to start session ${sessionKey}:`, err.message));
+  } else if (existing.loggedOut) {
+    // A logged-out session's old creds are permanently invalid on WhatsApp's side —
+    // reusing them just reconnects-and-closes forever without ever emitting a fresh
+    // QR. Wipe the stale auth folder so Baileys registers as a new device.
+    console.log(`Re-pairing ${sessionKey}: clearing stale auth and requesting a fresh QR`);
+    sessions.delete(sessionKey);
+    fs.rmSync(sessionAuthDir(sessionKey), { recursive: true, force: true });
+    startSocket(sessionKey).catch(err => console.error(`Failed to start session ${sessionKey}:`, err.message));
+  }
   res.send(qrPageHtml(sessions.get(sessionKey)));
 });
 
