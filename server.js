@@ -446,6 +446,24 @@ app.post('/session/:sessionKey/logout', async (req, res) => {
   }
 });
 
+// Leave a specific WhatsApp group on a given session (used when a tenant on
+// the shared/default session is deleted — otherwise the bot's number stays
+// a member of that group forever, with nothing left tracking it).
+app.post('/session/:sessionKey/leave-group', async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const { sessionKey } = req.params;
+  const { groupId } = req.body || {};
+  if (!groupId) return res.status(400).json({ error: 'groupId required' });
+  const s = sessions.get(sessionKey);
+  if (!s?.sock) return res.status(503).json({ error: 'Session not connected' });
+  try {
+    await s.sock.groupLeave(groupId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/', (req, res) => res.send('WhatsApp Sender running (Baileys, multi-session)'));
 
 process.on('uncaughtException', (err) => {
