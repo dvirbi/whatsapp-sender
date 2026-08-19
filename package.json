@@ -4,7 +4,8 @@
   "description": "WhatsApp sender for Birger's Events (Baileys)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.16",
@@ -16,5 +17,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

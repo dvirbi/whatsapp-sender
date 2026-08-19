@@ -1,0 +1,54 @@
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Utils/decode-wa-message.js b/node_modules/@whiskeysockets/baileys/lib/Utils/decode-wa-message.js
+index a3ccfe6..088d46b 100644
+--- a/node_modules/@whiskeysockets/baileys/lib/Utils/decode-wa-message.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Utils/decode-wa-message.js
+@@ -146,14 +146,43 @@ export const decryptMessageNode = (stanza, meId, meLid, repository, logger) => {
+                                 });
+                                 break;
+                             case 'pkmsg':
+-                            case 'msg':
++                            case 'msg': {
+                                 const user = isJidUser(sender) ? sender : author;
+-                                msgBuffer = await repository.decryptMessage({
+-                                    jid: user,
+-                                    type: e2eType,
+-                                    ciphertext: content
+-                                });
++                                try {
++                                    msgBuffer = await repository.decryptMessage({
++                                        jid: user,
++                                        type: e2eType,
++                                        ciphertext: content
++                                    });
++                                } catch (err) {
++                                    // WhatsApp tags this stanza with both identity forms
++                                    // (sender_pn/sender_lid, participant_pn/participant_lid)
++                                    // whenever it knows the pairing. If the primary address's
++                                    // session doesn't verify, retry once with the OTHER form
++                                    // WhatsApp itself paired to this message before giving up —
++                                    // fixes persistent "Bad MAC" when our stored session and the
++                                    // sender's current session were established under different
++                                    // identity forms of the same device (own-account multi-device
++                                    // sync is the common case). Backport of upstream PR #2763.
++                                    const altUser = isLidUser(user)
++                                        ? (stanza.attrs.participant_pn || stanza.attrs.sender_pn)
++                                        : (stanza.attrs.participant_lid || stanza.attrs.sender_lid);
++                                    if (!altUser || altUser === user) {
++                                        throw err;
++                                    }
++                                    logger.debug({ key: fullMessage.key, primary: user, retryWith: altUser }, 'primary identity failed to decrypt, retrying with stanza-provided PN/LID pairing');
++                                    try {
++                                        msgBuffer = await repository.decryptMessage({
++                                            jid: altUser,
++                                            type: e2eType,
++                                            ciphertext: content
++                                        });
++                                    } catch {
++                                        throw err;
++                                    }
++                                }
+                                 break;
++                            }
+                             case 'plaintext':
+                                 msgBuffer = content;
+                                 break;
