@@ -1,4 +1,6 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const qrcode = require('qrcode');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
@@ -11,115 +13,190 @@ app.use(express.json({ limit: '20mb' }));
 
 const API_SECRET = process.env.API_SECRET || 'birgers-secret-2026';
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '07db50019cb2904b93e3d895e4a3256c';
-const HEBEVENTS_URL = process.env.HEBEVENTS_URL || 'https://hebevents.vercel.app';
-const AUTH_DIR = './data/auth';
-const LINK_CODE_RE = /HE-[A-Z0-9]{4}/i;
+const AUTH_ROOT = './data/auth';
+const DEFAULT_SESSION = '__default__';
 
-let qrDataUrl = null;
-let isReady = false;
-let sock = null;
+// sessionKey -> { sock, isReady, qrDataUrl }
+const sessions = new Map();
 
-async function startSocket() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+function sessionAuthDir(sessionKey) {
+  return path.join(AUTH_ROOT, sessionKey);
+}
+
+// One-time, idempotent migration: the pre-multi-session server stored auth files
+// directly in AUTH_ROOT. If that flat layout is still there and __default__
+// doesn't exist yet, move the files in — so the existing WhatsApp connection
+// (בירגר/ששון) survives the upgrade to multi-session without a re-scan.
+function migrateFlatAuthIfNeeded() {
+  const legacyCreds = path.join(AUTH_ROOT, 'creds.json');
+  const defaultDir = sessionAuthDir(DEFAULT_SESSION);
+  if (!fs.existsSync(legacyCreds) || fs.existsSync(defaultDir)) return;
+
+  console.log('🔄 Migrating flat auth layout to ./data/auth/__default__/ ...');
+  fs.mkdirSync(defaultDir, { recursive: true });
+  for (const entry of fs.readdirSync(AUTH_ROOT)) {
+    const full = path.join(AUTH_ROOT, entry);
+    if (fs.statSync(full).isFile()) {
+      fs.renameSync(full, path.join(defaultDir, entry));
+    }
+  }
+  console.log('✅ Migration complete — default session preserved.');
+}
+
+function listKnownSessionKeys() {
+  if (!fs.existsSync(AUTH_ROOT)) return [];
+  return fs.readdirSync(AUTH_ROOT).filter(entry => {
+    const full = path.join(AUTH_ROOT, entry);
+    return fs.statSync(full).isDirectory();
+  });
+}
+
+const startingSessions = new Set();
+
+async function startSocket(sessionKey) {
+  // Guard against a concurrent second start for the same key (e.g. the QR
+  // page auto-refreshing before the first call finishes its awaits) — two
+  // Baileys sockets writing to the same auth folder at once would corrupt it.
+  if (startingSessions.has(sessionKey)) return sessions.get(sessionKey)?.sock;
+  startingSessions.add(sessionKey);
+  try {
+    return await startSocketInner(sessionKey);
+  } finally {
+    startingSessions.delete(sessionKey);
+  }
+}
+
+async function startSocketInner(sessionKey) {
+  const { state, saveCreds } = await useMultiFileAuthState(sessionAuthDir(sessionKey));
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
+  const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     browser: ['BirgersEvents', 'Chrome', '120.0.0'],
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  const entry = sessions.get(sessionKey) || {};
+  entry.sock = sock;
+  entry.isReady = false;
+  entry.qrDataUrl = entry.qrDataUrl || null;
+  sessions.set(sessionKey, entry);
 
-  // Fires when the bot learns about a new group (including when it's just been added to one).
-  // If the group name contains a link code (HE-XXXX), tell HebEvents to associate it with that tenant.
-  sock.ev.on('groups.upsert', async (groups) => {
-    for (const g of groups) {
-      const match = (g.subject || '').match(LINK_CODE_RE);
-      if (!match) continue;
-      const code = match[0].toUpperCase();
-      try {
-        await fetch(`${HEBEVENTS_URL}/api/link-whatsapp-group`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ secret: API_SECRET, code, groupId: g.id }),
-        });
-        console.log(`🔗 Linked group "${g.subject}" (${g.id}) via code ${code}`);
-      } catch (err) {
-        console.error('Failed to notify HebEvents of group link:', err.message);
-      }
-    }
-  });
+  sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
+    const s = sessions.get(sessionKey);
+    if (!s) return;
 
     if (qr) {
-      console.log('QR received — scan at /qr');
-      qrDataUrl = await qrcode.toDataURL(qr);
-      isReady = false;
+      console.log(`QR received for session "${sessionKey}"`);
+      s.qrDataUrl = await qrcode.toDataURL(qr);
+      s.isReady = false;
     }
 
     if (connection === 'open') {
-      console.log('✅ WhatsApp connected!');
-      isReady = true;
-      qrDataUrl = null;
+      console.log(`✅ WhatsApp connected: ${sessionKey}`);
+      s.isReady = true;
+      s.qrDataUrl = null;
+      s.loggedOut = false;
     }
 
     if (connection === 'close') {
-      isReady = false;
+      s.isReady = false;
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log('Connection closed, code:', code);
+      console.log(`Connection closed (${sessionKey}), code:`, code);
       if (code !== DisconnectReason.loggedOut) {
-        console.log('Reconnecting...');
-        setTimeout(startSocket, 3000);
+        s.loggedOut = false;
+        console.log(`Reconnecting ${sessionKey}...`);
+        setTimeout(() => startSocket(sessionKey), 3000);
       } else {
-        console.log('Logged out — delete auth and restart to re-scan QR');
+        s.loggedOut = true;
+        console.log(`Logged out (${sessionKey}) — needs a fresh QR scan.`);
       }
     }
   });
+
+  return sock;
 }
 
-// QR code page
-app.get('/qr', (req, res) => {
-  if (isReady) return res.send('<h2>✅ WhatsApp מחובר!</h2>');
-  if (!qrDataUrl) return res.send('<h2>⏳ ממתין לקוד QR...</h2><meta http-equiv="refresh" content="3">');
-  res.send(`
+function requireSecret(req, res) {
+  const secret = req.query.secret || req.body?.secret;
+  if (secret !== API_SECRET) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+function targetToJid(target) {
+  if (target.includes('@')) return target;
+  const cleaned = target.replace(/[\s\-\+\(\)]/g, '');
+  if (/^\d{9,15}$/.test(cleaned)) {
+    const normalized = cleaned.startsWith('0') ? '972' + cleaned.slice(1) : cleaned;
+    return normalized + '@s.whatsapp.net';
+  }
+  return null;
+}
+
+function qrPageHtml(entry) {
+  if (!entry) return '<h2>⏳ ממתין לקוד QR...</h2><meta http-equiv="refresh" content="3">';
+  if (entry.isReady) return '<h2>✅ WhatsApp מחובר!</h2>';
+  if (!entry.qrDataUrl) return '<h2>⏳ ממתין לקוד QR...</h2><meta http-equiv="refresh" content="3">';
+  return `
     <html><body style="text-align:center;font-family:sans-serif;padding:40px">
       <h2>סרוק עם WhatsApp</h2>
-      <img src="${qrDataUrl}" style="max-width:300px"/>
+      <img src="${entry.qrDataUrl}" style="max-width:300px"/>
       <p>פתח WhatsApp → הגדרות → מכשירים מקושרים → קשר מכשיר</p>
       <meta http-equiv="refresh" content="5">
     </body></html>
-  `);
+  `;
+}
+
+// Legacy QR page — the default/shared session (דביר). No secret required,
+// matches pre-multi-session behavior exactly.
+app.get('/qr', (req, res) => {
+  res.send(qrPageHtml(sessions.get(DEFAULT_SESSION)));
 });
 
-// Status endpoint
+// Per-tenant QR page. Requires the shared API secret — the tenant-admin JWT
+// check happens upstream in HebEvents' Vercel proxy before this is ever called.
+app.get('/qr/:sessionKey', (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const { sessionKey } = req.params;
+  if (!sessions.has(sessionKey)) startSocket(sessionKey).catch(err => console.error(`Failed to start session ${sessionKey}:`, err.message));
+  res.send(qrPageHtml(sessions.get(sessionKey)));
+});
+
 app.get('/status', (req, res) => {
-  res.json({ ready: isReady });
+  const s = sessions.get(DEFAULT_SESSION);
+  res.json({ ready: !!s?.isReady });
 });
 
-// Health check for Railway
-app.get('/health', (req, res) => {
-  res.status(200).send('ok');
+app.get('/status/:sessionKey', (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const s = sessions.get(req.params.sessionKey);
+  res.json({ ready: !!s?.isReady, loggedOut: !!s?.loggedOut });
 });
 
-// Version check (to verify deployments)
+app.get('/health', (req, res) => res.status(200).send('ok'));
+
 app.get('/version', (req, res) => {
-  res.json({ version: '3.0.0', features: ['render-and-send', 'puppeteer'] });
+  res.json({ version: '4.0.0', features: ['multi-session', 'render-and-send', 'puppeteer'] });
 });
 
-// Send message to targets
+// Send message to targets. `tenant` selects the session; omitted = default (backward compatible).
 app.post('/send', async (req, res) => {
-  const { imageBase64, imageUrl, caption, targets, secret, textOnly } = req.body;
+  const { imageBase64, imageUrl, caption, targets, secret, textOnly, tenant } = req.body;
 
-  if (secret !== API_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  if (!isReady || !sock) {
-    return res.status(503).json({ error: 'WhatsApp not connected' });
+  if (secret !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+
+  const sessionKey = tenant || DEFAULT_SESSION;
+  const s = sessions.get(sessionKey);
+  if (!s?.isReady || !s.sock) {
+    return res.status(503).json({ error: 'WhatsApp not connected', session: sessionKey });
   }
   if (!textOnly && !imageBase64 && !imageUrl) {
     return res.status(400).json({ error: 'imageBase64, imageUrl, or textOnly required' });
@@ -128,27 +205,18 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'targets array required' });
   }
 
+  const sock = s.sock;
   const results = [];
   let totalSent = 0;
   let totalFailed = 0;
 
   for (const target of targets) {
     try {
-      // Convert target to WhatsApp JID
-      let jid;
-      if (target.includes('@')) {
-        // Already a JID (e.g. group ID like 120363...@g.us)
-        jid = target;
-      } else {
-        const cleaned = target.replace(/[\s\-\+\(\)]/g, '');
-        if (/^\d{9,15}$/.test(cleaned)) {
-          const normalized = cleaned.startsWith('0') ? '972' + cleaned.slice(1) : cleaned;
-          jid = normalized + '@s.whatsapp.net';
-        } else {
-          results.push({ target, success: false, error: 'Invalid target format' });
-          totalFailed++;
-          continue;
-        }
+      const jid = targetToJid(target);
+      if (!jid) {
+        results.push({ target, success: false, error: 'Invalid target format' });
+        totalFailed++;
+        continue;
       }
 
       if (textOnly || (!imageBase64 && !imageUrl)) {
@@ -162,9 +230,9 @@ app.post('/send', async (req, res) => {
 
       results.push({ target, success: true });
       totalSent++;
-      console.log(`✅ Sent to: ${target}`);
+      console.log(`✅ Sent to: ${target} (session: ${sessionKey})`);
     } catch (err) {
-      console.error(`❌ Failed to send to ${target}:`, err.message);
+      console.error(`❌ Failed to send to ${target} (session: ${sessionKey}):`, err.message);
       results.push({ target, success: false, error: err.message });
       totalFailed++;
     }
@@ -175,23 +243,22 @@ app.post('/send', async (req, res) => {
 
 // Render birthday card (identical to client BirthdayCard.jsx) and send as JPEG
 app.post('/render-and-send', async (req, res) => {
-  const { secret, targets, name, title, message, fromName, hebStr, bg, layout } = req.body;
+  const { secret, targets, name, title, message, fromName, hebStr, bg, layout, tenant } = req.body;
 
-  if (secret !== API_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  if (!isReady || !sock) {
-    return res.status(503).json({ error: 'WhatsApp not connected' });
+  if (secret !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+
+  const sessionKey = tenant || DEFAULT_SESSION;
+  const s = sessions.get(sessionKey);
+  if (!s?.isReady || !s.sock) {
+    return res.status(503).json({ error: 'WhatsApp not connected', session: sessionKey });
   }
   if (!targets || !Array.isArray(targets) || targets.length === 0) {
     return res.status(400).json({ error: 'targets array required' });
   }
 
   try {
-    // Build card HTML — identical to BirthdayCard.jsx with same CSS
     const cardHtml = buildCardHtml({ name, title, message, fromName, hebStr, bg, layout });
 
-    // Render with Puppeteer → JPEG (high-res so WhatsApp displays inline)
     const browser = await puppeteer.launch({
       headless: 'new',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
@@ -206,26 +273,18 @@ app.post('/render-and-send', async (req, res) => {
 
     console.log(`✅ Card rendered: ${(jpegBuffer.length / 1024).toFixed(1)} KB`);
 
-    // Send JPEG buffer directly to WhatsApp targets (displays inline without download)
+    const sock = s.sock;
     const results = [];
     let totalSent = 0;
     let totalFailed = 0;
 
     for (const target of targets) {
       try {
-        let jid;
-        if (target.includes('@')) {
-          jid = target;
-        } else {
-          const cleaned = target.replace(/[\s\-\+\(\)]/g, '');
-          if (/^\d{9,15}$/.test(cleaned)) {
-            const normalized = cleaned.startsWith('0') ? '972' + cleaned.slice(1) : cleaned;
-            jid = normalized + '@s.whatsapp.net';
-          } else {
-            results.push({ target, success: false, error: 'Invalid target format' });
-            totalFailed++;
-            continue;
-          }
+        const jid = targetToJid(target);
+        if (!jid) {
+          results.push({ target, success: false, error: 'Invalid target format' });
+          totalFailed++;
+          continue;
         }
 
         const caption = `🎉 מזל טוב ${name}!\n${hebStr || ''}`;
@@ -337,13 +396,12 @@ body { font-family: 'Heebo', sans-serif; display: flex; align-items: center; jus
 </html>`;
 }
 
-// List groups
+// List groups for the default/shared session (legacy — superadmin/cron only, gated in HebEvents' proxy)
 app.get('/groups', async (req, res) => {
-  if (!isReady || !sock) {
-    return res.status(503).json({ error: 'WhatsApp not connected' });
-  }
+  const s = sessions.get(DEFAULT_SESSION);
+  if (!s?.isReady || !s.sock) return res.status(503).json({ error: 'WhatsApp not connected' });
   try {
-    const groups = await sock.groupFetchAllParticipating();
+    const groups = await s.sock.groupFetchAllParticipating();
     const list = Object.values(groups)
       .filter(g => g.id && g.subject)
       .map(g => ({ id: g.id, name: g.subject }));
@@ -354,7 +412,41 @@ app.get('/groups', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => res.send('WhatsApp Sender running (Baileys)'));
+// List groups for a specific tenant's own session — safe to expose to that
+// tenant's admin, since it's scoped to their own WhatsApp account only.
+app.get('/groups/:sessionKey', async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const s = sessions.get(req.params.sessionKey);
+  if (!s?.isReady || !s.sock) return res.status(503).json({ error: 'WhatsApp not connected' });
+  try {
+    const groups = await s.sock.groupFetchAllParticipating();
+    const list = Object.values(groups)
+      .filter(g => g.id && g.subject)
+      .map(g => ({ id: g.id, name: g.subject }));
+    list.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+    res.json({ groups: list });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Disconnect and remove a tenant's session entirely (used when a tenant is deleted).
+app.post('/session/:sessionKey/logout', async (req, res) => {
+  if (!requireSecret(req, res)) return;
+  const { sessionKey } = req.params;
+  if (sessionKey === DEFAULT_SESSION) return res.status(400).json({ error: 'Cannot remove the default session' });
+  const s = sessions.get(sessionKey);
+  try {
+    if (s?.sock) await s.sock.logout().catch(() => {});
+    sessions.delete(sessionKey);
+    fs.rmSync(sessionAuthDir(sessionKey), { recursive: true, force: true });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/', (req, res) => res.send('WhatsApp Sender running (Baileys, multi-session)'));
 
 process.on('uncaughtException', (err) => {
   console.error('⚠️ Uncaught exception:', err.message);
@@ -366,5 +458,9 @@ process.on('unhandledRejection', (err) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server on port ${PORT}`);
-  startSocket();
+  migrateFlatAuthIfNeeded();
+  const known = new Set([DEFAULT_SESSION, ...listKnownSessionKeys()]);
+  for (const key of known) {
+    startSocket(key).catch(err => console.error(`Failed to start session ${key}:`, err.message));
+  }
 });
